@@ -1,0 +1,36 @@
+Considerando o esquema lógico do banco de dados apresentado a seguir para campeonatos  de futebol,
+especifique uma função para computar a tabela de classificação dos campeonatos.  
+A função deverá ter como parâmetros de entrada
+1) o código do campeonato para o qual se  deseja gerar a tabela de classificação,[
+2) a posição inicial do ranque e 
+3) a posição final do  ranque. 
+Obs. 1: Uma vitória vale 3 pontos e um empate 1 ponto. 
+Obs. 2: A classificação é feita por ordem decrescente de pontuação. 
+Obs. 3: O critério de desempate é o número de vitórias 
+
+Dica: SELECT… LIMIT l OFFSET 0; -- recupera l tupla a partir da  posição 0 do result set. 
+
+drop table if exists campeonato cascade;
+CREATE TABLE campeonato 
+  (codigo text NOT NULL, 
+  nome TEXT NOT NULL, 
+  ano integer not null, 
+  CONSTRAINT campeonato_pk PRIMARY KEY (codigo)); 
+drop table if exists time_ cascade; 
+CREATE TABLE time_ 
+  (sigla text NOT NULL, 
+  nome TEXT NOT NULL, 
+  CONSTRAINT time_pk PRIMARY KEY (sigla)); 
+drop table if exists jogo cascade; 
+CREATE TABLE jogo 
+  (campeonato text not null, 
+  numero integer NOT NULL, 
+  time1 text NOT NULL, 
+  time2 text NOT NULL, 
+  gols1 integer not null, 
+  gols2 integer not null, 
+  data_ date not null, 
+  CONSTRAINT jogo_pk PRIMARY KEY  (campeonato,numero), 
+  CONSTRAINT jogo_campeonato_fk FOREIGN KEY   (campeonato) REFERENCES campeonato  (codigo), 
+  CONSTRAINT jogo_time_fk1 FOREIGN KEY (time1) REFERENCES time_ (sigla),  
+  CONSTRAINT jogo_time_fk2 FOREIGN KEY (time2) REFERENCES time_ (sigla));
