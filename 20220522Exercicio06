@@ -1,0 +1,319 @@
+/*
+As movimentações bancárias em conta corrente são armazenadas no banco de dados cujo
+esquema é apresentado a seguir. O limite de crédito de uma conta corrente é um valor de
+saldo devedor máximo permitido ao final de cada dia. Portanto, os saldos diários das contas
+correntes nunca podem ser inferiores a esse limite. Transações bancárias que aumentam o
+saldo devedor além desse limite são rejeitadas pelo banco. Esse limite pode variar com o
+tempo e é registrado na tabela limite_credito com sua data de início e fim. Quando a
+data de fim não é informada assume-se que o limite informado é válido até o encerramento
+da conta corrente. Quando um período de atividade da conta corrente não é coberto por
+nenhum registro de limite de crédito assume-se que o limite é zero. Implemente triggers em
+PL/pgSql para garantir que a regra de limite de saldo devedor não será violada. Note que a
+inclusão da sequência de movimentações ([10/1/18,R$100], [10/1/18,-R$200],
+[10/1/18,R$1000]) não apresentará saldo negativo após serem inseridas no BD, sendo
+portanto válidas. A verificação dos limite deve, então, ocorrer após as alterações do BD.
+Utilize tabela temporária para armazenar as contas correntes que devem ser verificadas após
+operações no BD.
+*/
+
+/* pré-código */
+DO $$ BEGIN
+    PERFORM drop_functions();
+    PERFORM drop_tables();
+END $$;
+
+
+-- Criar tabelas --
+CREATE TABLE cliente (
+    id int primary key,
+    nome varchar not null
+);
+
+CREATE TABLE conta_corrente (
+    id int primary key,
+    abertura timestamp not null,
+    encerramento timestamp
+);
+
+CREATE TABLE correntista (
+    cliente int references cliente(id),
+    conta_corrente int references conta_corrente(id),
+    primary key (cliente, conta_corrente)
+);
+
+CREATE TABLE limite_credito (
+    conta_corrente int references conta_corrente(id),
+    valor float not null,
+    inicio timestamp not null,
+    fim timestamp
+);
+
+CREATE TABLE movimento (
+    conta_corrente int references conta_corrente(id),
+    "data" timestamp,
+    valor float not null,
+    primary key (conta_corrente, "data")
+);
+
+CREATE TABLE temp_movimento (
+    conta_corrente int references conta_corrente(id),
+    data_original TIMESTAMP,
+    data_comparacao TIMESTAMP,
+    valor float not null,
+    primary key (conta_corrente, "data")
+);
+
+-- Popular Tabelas --
+
+INSERT INTO cliente (id, nome)
+VALUES
+(1, "João da Silva"),
+(2, "Maria José"),
+(3, "Fulano de Tal");
+
+/* inserindo contas ativas */
+INSERT INTO conta_corrente (id, abertura)
+VALUES
+(1, 2020-01-01 00:00:00+03:00),
+(2, 2020-02-02 00:00:00+03:00),
+(3, 2020-03-03 00:00:00+03:00),
+(4, 2020-04-04 00:00:00+03:00) /* conta conjunta João e Maria */
+;
+
+/* inserindo contas encerradas */
+INSERT INTO conta_corrente (id, abertura, encerramento)
+VALUES
+(5, 2020-05-05 00:00:00+03:00, 2021-05-05 00:00:00+03:00);
+
+INSERT INTO correntista (cliente, conta_corrente)
+VALUES
+(1, 1),
+(2, 2),
+(3, 3),
+(1, 4),
+(2, 4),
+(3, 5) /* conta encerrada */
+;
+
+/*
+Casos de limites:
+    - (1) só há um limite ad eternum
+    - (2) teve um temporário, agora tem um ad eternum
+    - (3) nunca teve limite algum
+    - (4) não tinha limite, mas passou a ter
+*/
+
+/* inserindo limites ad eternum */
+INSERT INTO limite_credito (conta_corrente, valor, inicio)
+VALUES
+(1, 1000, 2020-01-01 00:00:00+03:00), /* limite simples */
+(2, 1000, 2021-02-02 10:00:00+03:00), /* conta com dois limites  - segundo limite */
+(4, 1000, 2021-04-04 00:00:00+03:00)
+;
+
+/* inserindo limites ad temporários  */
+INSERT INTO limite_credito (conta_corrente, valor, inicio, fim)
+VALUES
+(1, 1000, 2020-01-01 00:00:00+03:00),
+(2, 2000, 2020-02-02 00:00:00+03:00, 2021-02-02 09:59:59+03:00) /* conta com dois limites  - primeiro limite */
+;
+
+INSERT INTO movimento (conta_corrente, "data", valor)
+VALUES
+(1, 2020-01-01 02:00:00+03:00, 1000),
+(2, 2021-02-02 10:00:00+03:00, 1000),
+(3, 2020-03-03 00:00:00+03:00, 1000),
+(4, 2020-04-04 00:00:00+03:00, 1000),
+(5, 2020-05-05 00:00:00+03:00, 1000)
+;
+
+INSERT INTO movimento (conta_corrente, "data", valor)
+VALUES
+(1, 2020-01-01 01:00:00+03:00, 100), /* depósitos iniciais */
+(1, 2020-01-01 02:00:00+03:00, 400),
+(1, 2020-01-01 01:00:00+03:00, -1000),
+(1, 2020-01-01 01:00:00+03:00, 500),
+;
+-- Transações bancárias que aumentam o saldo devedor além desse limite são rejeitadas pelo banco.
+-- [saldo] + [movimentações do dia] + limite >= 0
+
+-- se limite novo,
+--      se limite novo < limite antigo, dispara trigger
+--      se limite novo tem data fim, se data fim < data atual, dispara trigger
+
+
+/*
+CREATE OR REPLACE FUNCTION processa_movimento_dia() RETURNS TRIGGER AS $movi_dia$
+    -- se movimentação do dia < 0, se soma movimentações do dia < 0, dispara trigger
+    BEGIN
+        CREATE temp_movimentos IF NOT EXISTS ON COMMIT DROP;
+        INSERT INTO temp_movimentos (conta_corrente, "data", valor) VALUES (NEW.conta_corrente, NEW."data", NEW.valor);
+        RETURN NULL;
+    END;
+$movi_dia$ LANGUAGE plpgsql;
+
+CREATE TRIGGER movi_dia
+AFTER INSERT movimento
+    FOR EACH STATEMENT EXECUTE FUNCTION processa_movimento_dia();
+*/
+
+-- Cria a tabela temporária que irá conter as movimentações.
+-- CREATE OR REPLACE FUNCTION processa_movimento_dia() RETURNS TRIGGER AS $movi_dia$
+--     BEGIN
+--         CREATE temp_movimentos IF NOT EXISTS ON COMMIT DROP;
+--         RETURN NULL;
+--     END;
+-- $movi_dia$ LANGUAGE plpgsql;
+
+-- Insere cada movimentação na tabela temporária ao invés de inserir na table (instead of).
+CREATE OR REPLACE FUNCTION insere_movimentos() RETURNS TRIGGER AS $insere_movimentos$
+    BEGIN
+        INSERT INTO temp_movimentos (conta_corrente, data_comparacao, data_original, valor) VALUES (NEW.conta_corrente, extrai_ano_mes_dia(NEW."data"), NEW."data", NEW.valor);
+        RETURN NULL;
+    END;
+$insere_movimentos$ LANGUAGE plpgsql;
+-- rodar um for each row
+
+CREATE TRIGGER insere_movimentos
+BEFORE INSERT ON movimento
+    FOR EACH ROW EXECUTE FUNCTION insere_movimentos();
+
+-- extrai dia, mes e ano de um timestamp
+CREATE OR REPLACE FUNCTION extrai_ano_mes_dia("data" TIMESTAMP) RETURNS TIMESTAMP AS $proc_dia$
+    DECLARE
+        dia INTEGER;
+        mes INTEGER;
+        ano INTEGER;
+    BEGIN
+        SELECT EXTRACT(DAY FROM $1) INTO dia;
+        SELECT EXTRACT(MONTH FROM $1) INTO mes;
+        SELECT EXTRACT(YEAR FROM $1) INTO ano;
+        SELECT EXTRACT(YEAR FROM $1) INTO ano;
+        RETURN SELECT TIMESTAMP("ano" || '-' || "mes" || '-' || "dia");
+        RETURN;
+    END
+$proc_dia$ LANGUAGE plpgsql;
+
+-- Para cada conta onde ocorreu uma movimentação. for row1 in select distinct conta from temp_movimentacao;
+CREATE OR REPLACE FUNCTION verifica_integridade() RETURNS TRIGGER AS $verifica_integridade$
+    DECLARE
+        conta RECORD;
+        mov RECORD;
+        conta_mov RECORD;
+        ultimos_movimentos FLOAT;
+        conta_atual_eh_valida BOOLEAN;
+    BEGIN
+        --TODO: VERIFICAR SE O DISTINCT É UMA AGREGAÇÃO 
+        FOR conta IN (SELECT DISTINCT conta_corrente FROM temp_movimentacao) LOOP
+            conta_atual_eh_valida = TRUE;
+            FOR mov IN (SELECT DISTINCT data_comparacao FROM temp_movimentacao WHERE conta_corrente = conta.conta_corrente) LOOP
+                ultimos_movimentos :=  (SELECT SUM(valor) FROM temp_movimentacao AS t WHERE t.conta_corrente = conta.conta_corrente AND t.data_comparacao < mov.data_comparacao);
+                IF NOT is_limite_valido(conta.conta_corrente, ultimos_movimentos, mov.data_comparacao) THEN
+                    conta_atual_eh_valida = FALSE;
+                    BREAK;
+                END IF;
+            END LOOP;
+            --TODO: VERIFICAR SE É POSSÍVEL VALIDAR AS MOVIMENTAÇÕES POR DATA
+            IF conta_atual_eh_valida THEN
+                INSERT INTO movimento(conta_corrente, "data", valor) VALUES (SELECT conta_corrente, data_original, valor FROM temp_movimentacao WHERE conta_corrente = conta.conta_corrente);     
+                DELETE FROM temp_movimentacao WHERE conta_corrente = conta.conta_corrente;
+            ELSE
+                RAISE NOTICE "DEU ERRO :(";
+            END IF;
+        END LOOP;
+        RETURN NULL;
+    END;
+$verifica_integridade$ LANGUAGE plpgsql;
+
+CREATE TRIGGER verifica_integridade
+AFTER INSERT ON movimento
+    FOR EACH STATEMENT EXECUTE FUNCTION verifica_integridade();
+
+CREATE OR REPLACE FUNCTION is_limite_valido(conta INTEGER, ultimos_movimentos FLOAT, "data" TIMESTAMP) RETURNS BOOLEAN AS $proc_lim$
+    DECLARE
+        limite float;
+        saldo_parcial float;
+    BEGIN
+        --TODO: CONFERIR O FUNCIONAMENTO DA LINHA ABAIXO
+        SELECT valor FROM limite_credito WHERE conta_corrente = conta AND inicio <= "data" AND (fim IS NULL OR fim >= "data") INTO limite;
+        IF limite IS NULL THEN
+            limite := 0;
+        END IF;
+        saldo_parcial := (SELECT SUM(valor) FROM movimento WHERE conta_corrente = conta AND "data" <= "data");
+
+        RETURN saldo_parcial + ultimos_movimentos + limite >= 0;
+    END
+$proc_lim$ LANGUAGE plpgsql;
+
+
+
+-- Programa
+
+INSERT INTO movimento (conta_corrente, "data", valor)
+VALUES -- Não dispara o trigger: Valor final da conta > 0 (2000)
+    (1, 2022-01-01 01:00:00+03:00, 100),
+    (2, 2022-01-01 01:00:00+03:00, 100),
+    (1, 2022-01-01 01:00:00+03:00, 200),
+    (4, 2022-01-01 01:00:00+03:00, -500);
+
+
+INSERT INTO movimento (conta_corrente, "data", valor)
+VALUES (-2000, 2020-01-01 02:00:00+03:00) -- Não dispara o trigger: Valor final da conta = 0
+
+
+
+/*
+-- Plano Jorge
+1 - inserir na tabela temporaria as linhas do insert na tabela movimento originalmente;
+    1 | 2020-01-01 02:00:00+03:00 | 100
+    2 | 2020-01-01 02:00:00+03:00 | 100
+    1 | 2020-01-01 02:00:00+03:00 | 200
+    4 | 2020-01-01 02:00:00+03:00 | -500
+
+2 - para cada conta na tabela temporária, inserir o saldo;
+    1 | 2020-01-01 02:00:00+03:00 | 100
+    2 | 2020-01-01 02:00:00+03:00 | 100
+    1 | 2020-01-01 02:00:00+03:00 | 200
+    4 | 2020-01-01 02:00:00+03:00 | -500
+    1 | null                      | -1000 -- SALDO = SELECT SUM(m.valor) FROM movimento m WHERE m.conta = 1 AND m.data <= 2020-01-01 02:00:00+03:00;
+    2 | null                      | -5000
+    4 | null                      | 1000
+
+3 - para cada conta na tabela temporária, inserir o limite;
+    1 | 2020-01-01 02:00:00+03:00 | 100 | M
+    2 | 2020-01-01 02:00:00+03:00 | 100
+    1 | 2020-01-01 02:00:00+03:00 | 200
+    4 | 2020-01-01 02:00:00+03:00 | -500
+    1 | null                      | -1000 | S
+    2 | null                      | -5000
+    4 | null                      | 1000
+    1 | null                      | 1000 -- LIMITE = SELECT SUM(lm.valor) FROM limite l WHERE l.conta = 1 AND m.data = 2020-01-01 02:00:00+03:00;
+    1 | null                      | 2000 
+    2 | null                      | 5000  | L
+    4 | null                      | 0
+
+4 - para cada conta na tabela temporária, somar as movimentações;
+    a - se soma do dia < 0, bloquear as movimentações;
+    if (SELECT SUM(t.valor) FROM tabela_temporaria t WHERE t.conta = 1) > 0 THEN
+        INSERT INTO movimento (conta_corrente, "data", valor) VALUES (1, 2020-01-01 02:00:00+03:00, 100);
+    END IF;
+
+-- End plano Jorge
+*/
+
+Plano Daniel Bougleux 17:33
+-> Cria a tabela temporária que irá conter as movimentações.
+-> Insere cada movimentação na tabela temporária ao invés de inserir na table (instead of).
+-> Após todas as inserções, chama uma função que irá:
+	- Para cada conta onde ocorreu uma movimentação. for row1 in select distinct conta from temp_movimentacao;
+		- Para cada dia que teve uma movimentação nova naquela conta. for row2 in select distinct day from temp_movimentacao where conta = row1.conta;
+			- Calcula o saldo da conta até aquele dia. // lembrar de somar também as movimentações que estão em temp_movimentação
+			- Busca o limite da conta naquele dia.
+			- Soma todas as movimentações daquele dia. 
+			- Verifica se o limite + movimentações + saldo >= 0. 
+				- Caso positivo, segue em frente.
+				- Caso negativo, aborta a execução.
+                    - flag na conta para saber se foi bloqueada ou não.
+	__Se a execução não foi abortada__, insere as movimentações na tabela de movimentações (e apaga da temporaria).
+
+-- (RAISE exception) Antes de testar, verificar se numero de linhas da tabela temporária = 0;
